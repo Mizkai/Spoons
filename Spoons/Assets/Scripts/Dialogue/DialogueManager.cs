@@ -1,65 +1,148 @@
+
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.UI;
+using TMPro;
+using Ink.Runtime;
+using UnityEngine.EventSystems;
 
 public class DialogueManager : MonoBehaviour
 {
-    /*This class enables and disables a GameObject called dialogueBox, which will probably be a Unity UI Object like a Canvas
-    //It also can be given data from any ShowDialogueOnTriggerEnter components in the scene to update its child text component
-    to accomplish this, we will give every ShowDialogueOnTriggerEnter component a reference to this script, and there should only be one in the scene!
-    */
 
-    public GameObject dialogueBox;
-    private Text dialogueText;
+    [Header("Dialogue UI")]
+    [SerializeField] private GameObject dialoguePanel;
+    [SerializeField] private TextMeshProUGUI dialogueText;
 
-    public ShowDialogueOnTriggerEnter currentDialogue;
-    
-    // Awake is called before the first frame update
-    private void Awake()
+    [Header("Choices UI")]
+    [SerializeField] private GameObject[] choices;
+    private TextMeshProUGUI[] choicesText;
+
+    private Story currentStory;
+    public bool dialogueIsPlaying { get; private set; }
+
+    private static DialogueManager instance;
+
+    private void Awake() 
     {
-        dialogueText = dialogueBox.GetComponentInChildren<Text>();
-        if(dialogueText == null)
+        if (instance != null)
         {
-            Debug.LogError("DialogueManager could not find Text component");
+            Debug.LogWarning("Found more than one Dialogue Manager in the scene");
         }
-
-        // We are compiling an array, a collection, of all of these dialogueTrigger components in the scene before the game starts
-        ShowDialogueOnTriggerEnter[] dialogueTriggerArray = FindObjectsOfType<ShowDialogueOnTriggerEnter>();
-
-        //we then cycle through every single element of that array and making sure this component is hooked up to the dialogueManager variable in each of those triggers
-        foreach (ShowDialogueOnTriggerEnter dialogueTrigger in dialogueTriggerArray)
-        {
-            dialogueTrigger.dialogueManager = this;
-        }
-
-        dialogueBox.SetActive(false);
+        instance = this;
     }
 
-    /*This method is called from the ShowDialogueOnTriggerEnter script, and that component tells the dialogueManager what text to display and then makes the dialogue box appear
-    //we are checking whether the dialogueBox is already visible and whether the currentDialogue is the same as the newDialogue so that, 
-    if the dialogueBox had a an animation that plays when it is made active  we can avoid that being triggered redundantly
-    */
-    public void ShowDialogue(ShowDialogueOnTriggerEnter newDialogue)
+    public static DialogueManager GetInstance() 
     {
-        if (currentDialogue != newDialogue && dialogueBox.activeSelf == false)
+        return instance;
+    }
+
+    private void Start() 
+    {
+        dialogueIsPlaying = false;
+        dialoguePanel.SetActive(false);
+
+        // get all of the choices text 
+        choicesText = new TextMeshProUGUI[choices.Length];
+        int index = 0;
+        foreach (GameObject choice in choices) 
         {
-            dialogueBox.SetActive(true);
-            dialogueText.text = newDialogue.dialogueLine;
-            currentDialogue = newDialogue;
+            choicesText[index] = choice.GetComponentInChildren<TextMeshProUGUI>();
+            index++;
         }
     }
 
-    /*The HideDialogue method is also called from the ShowDialogueOnTriggerEnter script, and it checks if the dialogueBox is currentlyVisible and that the current dialogue
-    //matches the trigger that is instigating this HideDialogue method. In case multiple dialogueTriggers overlap, this will prevent one trigger from prematurely closing
-    a neigboring trigger
-    */
-    public void HideDialogue(ShowDialogueOnTriggerEnter instigator)
+    private void Update() 
     {
-        if(currentDialogue == instigator && dialogueBox.activeSelf == true)
+        // return right away if dialogue isn't playing
+        if (!dialogueIsPlaying) 
         {
-            dialogueBox.SetActive(false);
-            currentDialogue = null;
+            return;
+        }
+
+        // handle continuing to the next line in the dialogue when submit is pressed
+        // NOTE: The 'currentStory.currentChoiecs.Count == 0' part was to fix a bug after the Youtube video was made
+        if (currentStory.currentChoices.Count == 0 && Input.GetKey(KeyCode.Space))
+        {
+            ContinueStory();
         }
     }
+
+    public void EnterDialogueMode(TextAsset inkJSON) 
+    {
+        currentStory = new Story(inkJSON.text);
+        dialogueIsPlaying = true;
+        dialoguePanel.SetActive(true);
+
+        ContinueStory();
+    }
+
+    private IEnumerator ExitDialogueMode() 
+    {
+        yield return new WaitForSeconds(2f);
+
+        dialogueIsPlaying = false;
+        dialoguePanel.SetActive(false);
+        dialogueText.text = "";
+    }
+
+    private void ContinueStory() 
+    {
+        if (currentStory.canContinue) 
+        {
+            // set text for the current dialogue line
+            dialogueText.text = currentStory.Continue();
+            // display choices, if any, for this dialogue line
+            DisplayChoices();
+        }
+        else 
+        {
+            StartCoroutine(ExitDialogueMode());
+        }
+    }
+
+    private void DisplayChoices() 
+    {
+        List<Choice> currentChoices = currentStory.currentChoices;
+
+        // defensive check to make sure our UI can support the number of choices coming in
+        if (currentChoices.Count > choices.Length)
+        {
+            Debug.LogError("More choices were given than the UI can support. Number of choices given: " 
+                + currentChoices.Count);
+        }
+
+        int index = 0;
+        // enable and initialize the choices up to the amount of choices for this line of dialogue
+        foreach(Choice choice in currentChoices) 
+        {
+            choices[index].gameObject.SetActive(true);
+            choicesText[index].text = choice.text;
+            index++;
+        }
+        // go through the remaining choices the UI supports and make sure they're hidden
+        for (int i = index; i < choices.Length; i++) 
+        {
+            choices[i].gameObject.SetActive(false);
+        }
+
+        StartCoroutine(SelectFirstChoice());
+    }
+
+    private IEnumerator SelectFirstChoice() 
+    {
+        // Event System requires we clear it first, then wait
+        // for at least one frame before we set the current selected object.
+        EventSystem.current.SetSelectedGameObject(null);
+        yield return new WaitForEndOfFrame();
+        EventSystem.current.SetSelectedGameObject(choices[0].gameObject);
+    }
+
+    public void MakeChoice(int choiceIndex)
+    {
+        currentStory.ChooseChoiceIndex(choiceIndex);
+        // NOTE: The below two lines were added to fix a bug after the Youtube video was made
+        //InputManager.GetInstance().RegisterSubmitPressed(); // this is specific to my InputManager script
+        ContinueStory();
+    }
+
 }
